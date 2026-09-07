@@ -51,6 +51,34 @@ try:
 except Exception:
     pass  # no secrets.toml — running locally
 
+# Google's credential files are gitignored, correctly — they are secrets. Which
+# means they do not exist on a deployed instance, and the Drive check reads as
+# "not configured" while the folder id sits there looking perfectly fine.
+#
+# So the file CONTENTS travel as secrets and are written back to disk here.
+# In Settings -> Secrets, paste each whole JSON as a TOML multi-line string
+# using triple single quotes:
+#
+#   GOOGLE_OAUTH_JSON = <triple-quoted contents of google-oauth.json>
+#   DRIVE_TOKEN_JSON  = <triple-quoted contents of drive-token.json>
+#
+# The token is the one that matters. It is what avoids a browser consent, and a
+# browser consent is impossible on a server — so generate it locally with
+# auth_drive.py first, then paste what that produced.
+for _secret, _target in (
+    ("GOOGLE_OAUTH_JSON", os.environ.get("DRIVE_CREDS", "google-oauth.json")),
+    ("DRIVE_TOKEN_JSON", os.environ.get("DRIVE_TOKEN", "drive-token.json")),
+):
+    try:
+        _blob = st.secrets.get(_secret)
+    except Exception:
+        _blob = None
+    if _blob and not Path(_target).exists():
+        try:
+            Path(_target).write_text(str(_blob))
+        except OSError:
+            pass
+
 st.set_page_config(page_title="Welvom", page_icon="◐", layout="wide")
 
 # --------------------------------------------------------------------------- #
@@ -230,7 +258,7 @@ with tab_clip:
     # More candidates than anyone will post. A week is 10-14 slots at two a day,
     # and having spares is what makes "these three are weak" survivable without
     # re-running the whole video.
-    n = c2.selectbox("How many clips?", [3, 5, 8, 12], index=2)
+    n = c2.selectbox("How many clips?", [1,2,3, 5, 8, 12], index=2)
     # No half-run option. A "just cut it" mode sounds useful and is not: the
     # raw cuts are horizontal with no captions, so nobody can judge them as
     # reels, and anyone who likes them has to pay for the second half anyway.
@@ -252,10 +280,13 @@ with tab_clip:
     elif not config.drive_folder_id:
         c3.caption("No DRIVE_FOLDER_ID in .env — clips stay local.")
     else:
-        # The commonest cause by a distance: the key file is not where the app
-        # is looking. Naming the absolute path it checked saves the guesswork.
-        c3.caption(f"Key file not found: `{_creds_path.resolve()}` — "
-                   f"clips stay local.")
+        # The commonest cause on a deployed instance: the credential files are
+        # gitignored, so they never got there. Naming both the path and the fix
+        # beats a caption saying "not configured".
+        c3.warning("Drive credentials missing — clips stay local.")
+        c3.caption(f"Looked for `{_creds_path}` in `{Path.cwd()}`. Deployed? "
+                   f"Add `GOOGLE_OAUTH_JSON` and `DRIVE_TOKEN_JSON` to Secrets "
+                   f"with the file contents.")
     stop = "edit"
 
     if video_path:
