@@ -81,6 +81,46 @@ for _secret, _target in (
 
 st.set_page_config(page_title="Welvom", page_icon="◐", layout="wide")
 
+# EVERY local import lives here, at module level, on purpose.
+#
+# Streamlit re-runs this file top to bottom on each interaction, and its file
+# watcher tracks local packages between runs. Importing `pipeline.*` inside a
+# button handler means the module is registered on one run and looked for on the
+# next after the watcher has dropped it, which surfaces as `KeyError: 'pipeline'`
+# and kills the app. Top-level imports are stable across reruns.
+#
+# This has to come after the secrets bridge above: config.py reads os.getenv when
+# it is imported, so the environment must already be populated.
+import report as _report
+from clip import DECLICK_S, render
+from pipeline.boundary import neighbours, refine
+from pipeline.build import analyse_video, save
+from pipeline.client_profile import load_profile, profile_path
+from pipeline.competitors import (
+    fetch_apify_batch,
+    fetch_official as fetch_competitor,
+    load_snapshots,
+    save_snapshot as save_competitor_snapshot,
+)
+from pipeline.config import config
+from pipeline.models import VideoAnalysis
+from pipeline.performance import (
+    AccountStats,
+    attach_sources,
+    fetch_official as fetch_performance,
+    register,
+    save_snapshot as save_performance_snapshot,
+)
+from pipeline.probe import extract_metadata
+from pipeline.select import select_clips
+from pipeline.storage import (
+    StorageError,
+    folder_link,
+    upload_clips,
+    upload_drive,
+)
+from pipeline.vizard import parse_result, poll, submit_for_editing
+
 # --------------------------------------------------------------------------- #
 # Styling
 #
@@ -155,7 +195,6 @@ with st.sidebar:
     st.caption("Long video in, reels out. Competitor audit on the side.")
     st.divider()
 
-    from pipeline.config import config
 
     # Which services are wired up is a deployment detail. A client seeing
     # "Groq (speech)" unticked learns nothing and worries anyway, so the whole
@@ -165,7 +204,6 @@ with st.sidebar:
         help="Shows configuration and bookkeeping that clients do not need.")
 
     if internal:
-        from pathlib import Path as _P
 
         st.caption("**Wired up**")
         for label, ok in [
@@ -182,22 +220,21 @@ with st.sidebar:
 
         # Drive gets its own lines: there are three separate ways for it to be
         # not-quite-configured and one tick would hide which you have hit.
-        _creds = _P(config.drive_creds)
+        _creds = Path(config.drive_creds)
         if not config.drive_folder_id:
             st.write("· Google Drive — no DRIVE_FOLDER_ID")
         elif not _creds.exists():
             st.write("· Google Drive — key file missing")
             st.caption(f"Looked for `{_creds}` in {_P.cwd()}")
-        elif not _P(config.drive_token).exists():
+        elif not Path(config.drive_token).exists():
             st.write("· Google Drive — not authorised")
             st.caption("Run `python auth_drive.py` once, locally.")
         else:
             st.write("✓ Google Drive")
 
-        if st.button("Test the Drive connection", use_container_width=True):
+        if st.button("Test the Drive connection", width="stretch"):
             try:
-                from pipeline.storage import upload_drive
-                probe = _P(tempfile.gettempdir()) / "welvom-test.txt"
+                probe = Path(tempfile.gettempdir()) / "welvom-test.txt"
                 probe.write_text("welvom connection test")
                 st.success(upload_drive(probe, "welvom-test.txt",
                                         folder_id=config.drive_folder_id,
@@ -228,16 +265,43 @@ with tab_clip:
                "moments that stand alone, cuts on the breath, and sends them "
                "for captions.")
 
+    # Clipping is the heavy tab: it holds the upload, extracts audio,
+    # transcribes, and renders several files. Streamlit Community Cloud gives
+    # 1 GB and wipes the disk on restart, so a real client recording will be
+    # killed mid-run. Better to say so than to let it die at 80%.
+    try:
+        _total_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (ValueError, OSError, AttributeError):
+        _total_gb = 0.0
+    if 0 < _total_gb < 2.5:
+        st.warning(
+            f"This machine has about {_total_gb:.1f} GB of memory. Clipping a "
+            f"long recording needs more than that and will be killed part-way "
+            f"through. Run this tab locally; the other two are fine here."
+        )
+        st.caption("A small VPS (about €4/month) runs all three without the "
+                   "ceiling, if it needs to be hosted.")
+
     up = st.file_uploader("Video", type=["mp4", "mov", "m4v", "mkv"],
                           label_visibility="collapsed",
                           help="Up to 5 GB — the limit is raised in "
                                ".streamlit/config.toml")
     video_path = None
     if up:
-        # Streamlit holds the upload in memory; ffmpeg needs a path on disk.
+        # Streamlit holds the whole upload in memory. Writing it with
+        # `write_bytes(up.getbuffer())` briefly holds a second copy, so a 500 MB
+        # file peaks near a gigabyte — which is the entire budget on Streamlit
+        # Community Cloud. Copying in chunks keeps the peak flat, and dropping
+        # the reference afterwards lets the buffer go.
+        import gc
+        import shutil as _sh
+
         tmp_dir = Path(tempfile.mkdtemp(prefix="welvom_"))
         video_path = tmp_dir / up.name
-        video_path.write_bytes(up.getbuffer())
+        with video_path.open("wb") as _out:
+            _sh.copyfileobj(up, _out, length=1 << 22)
+        up.seek(0)
+        gc.collect()
 
     # No model picker. Which model runs at which stage was settled by testing —
     # Claude for choosing clips and their edges, Gemini's free tier for topic
@@ -258,7 +322,7 @@ with tab_clip:
     # More candidates than anyone will post. A week is 10-14 slots at two a day,
     # and having spares is what makes "these three are weak" survivable without
     # re-running the whole video.
-    n = c2.selectbox("How many clips?", [1,2,3, 5, 8, 12], index=2)
+    n = c2.selectbox("How many clips?", [3, 5, 8, 12], index=2)
     # No half-run option. A "just cut it" mode sounds useful and is not: the
     # raw cuts are horizontal with no captions, so nobody can judge them as
     # reels, and anyone who likes them has to pay for the second half anyway.
@@ -274,7 +338,6 @@ with tab_clip:
                           label_visibility="collapsed")
             if keep_local else tempfile.gettempdir())
     if drive_on:
-        from pipeline.storage import folder_link
         c3.caption(f"Delivering to [the Drive folder]"
                    f"({folder_link(config.drive_folder_id)})")
     elif not config.drive_folder_id:
@@ -313,11 +376,6 @@ with tab_clip:
     if st.button("Start", type="primary", disabled=video_path is None):
         tmp = video_path
 
-        from pipeline.build import analyse_video, save
-        from pipeline.boundary import neighbours, refine
-        from pipeline.probe import extract_metadata
-        from pipeline.select import select_clips
-        from clip import render
 
         # Settled by testing: Claude picks the clips and their exact edges,
         # Gemini handles the cheap stages inside run.py.
@@ -332,7 +390,6 @@ with tab_clip:
             # video skips the slowest and only paid stage.
             analysis_path = out_dir / f"{meta.video_id}.json"
             if analysis_path.exists():
-                from pipeline.models import VideoAnalysis
                 analysis = VideoAnalysis(
                     **json.loads(analysis_path.read_text(encoding="utf-8")))
                 st.write(f"Transcript already on disk — reusing "
@@ -366,7 +423,6 @@ with tab_clip:
 
             urls = {}
             if stop in ("publish", "edit"):
-                from pipeline.storage import StorageError, upload_clips
                 try:
                     st.write("Putting the clips where Vizard can reach them…")
                     urls = upload_clips(clip_dir, meta.video_id, config,
@@ -382,7 +438,6 @@ with tab_clip:
             finished = []
             ready_dir = Path(dest) / f"{Path(tmp).stem}_{time.strftime('%Y%m%d')}"
             if stop == "edit" and urls:
-                from pipeline.vizard import parse_result, poll, submit_for_editing
                 tpl = int(config.vizard_template_id) if config.vizard_template_id else None
                 for c in clips:
                     if not c.url:
@@ -415,8 +470,6 @@ with tab_clip:
                                 # Uploaded from the local copy rather than
                                 # streamed straight through, so a Drive failure
                                 # cannot lose a clip we already paid to render.
-                                from pipeline.storage import StorageError as SE
-                                from pipeline.storage import upload_drive
                                 try:
                                     st.write(f"  uploading {local.name} to Drive…")
                                     link = upload_drive(
@@ -424,7 +477,7 @@ with tab_clip:
                                         folder_id=config.drive_folder_id,
                                         creds_file=config.drive_creds,
                                         token_file=config.drive_token)
-                                except SE as e:
+                                except StorageError as e:
                                     st.warning(f"Drive upload failed: {e}")
                             finished.append((c.rank, done.title, str(local), link))
                     except Exception as e:
@@ -480,7 +533,6 @@ with tab_clip:
             st.caption(f"Local copy in `{r['ready_dir']}` — vertical, captioned, "
                        f"with the client's template applied.")
             if drive_on:
-                from pipeline.storage import folder_link
                 st.markdown(f"**[Open the Drive folder]"
                             f"({folder_link(config.drive_folder_id)})** — send "
                             f"this link to whoever is scheduling.")
@@ -517,7 +569,6 @@ with tab_audit:
         st.stop()
 
     if st.button("Pull last 25 posts each", type="primary"):
-        from pipeline.competitors import fetch_apify_batch, fetch_official, save_snapshot
 
         handles = [client] + [h.strip().lstrip("@")
                               for h in rivals.splitlines() if h.strip()]
@@ -526,27 +577,24 @@ with tab_audit:
                 st.write("One Apify run for all handles — a minute or two")
                 comps = fetch_apify_batch(config.apify_token, handles, limit=25)
             else:
-                comps = [fetch_official(config.ig_user_id, config.ig_access_token,
+                comps = [fetch_competitor(config.ig_user_id, config.ig_access_token,
                                         h, limit=25) for h in handles]
             for c in comps:
                 st.write(f"{'·' if c.error else '✓'} {c.username} "
                          f"{c.error[:60] if c.error else f'{c.followers:,} followers'}")
-            path = save_snapshot(comps, Path(config.competitor_dir), client)
+            path = save_competitor_snapshot(comps, Path(config.competitor_dir), client)
             s.update(label="Done", state="complete", expanded=False)
         st.session_state.audit = {"client": client, "snapshot": str(path)}
 
     au = st.session_state.get("audit")
     if au:
-        from pipeline.client_profile import load_profile, profile_path
-        from pipeline.competitors import load_snapshots
-        import report as R
 
         out_dir = Path(config.competitor_dir)
         snaps = load_snapshots(out_dir, au["client"])
         if snaps:
             stamp, comps = snaps[-1]
             profile = load_profile(profile_path(au["client"], out_dir))
-            html = R.build(comps, au["client"], out_dir, stamp, profile)
+            html = _report.build(comps, au["client"], out_dir, stamp, profile)
             path = out_dir / f"{au['client']}_report_{stamp}.html"
             path.write_text(html, encoding="utf-8")
 
@@ -602,10 +650,9 @@ with tab_track:
                                    "for weekly tracking.")
 
     if st.button("Pull the numbers", type="primary"):
-        from pipeline.performance import attach_sources, fetch_official, save_snapshot
 
         with st.status("Reading Instagram…", expanded=True) as s_:
-            stats = fetch_official(config.client_ig_user_id,
+            stats = fetch_performance(config.client_ig_user_id,
                                    config.client_ig_token, limit=limit)
             if stats.error:
                 s_.update(label="Failed", state="error")
@@ -617,7 +664,7 @@ with tab_track:
             matched = attach_sources(stats, reg)
             if matched:
                 st.write(f"{matched} of them came from this pipeline")
-            path = save_snapshot(stats, Path(config.performance_dir), client_key)
+            path = save_performance_snapshot(stats, Path(config.performance_dir), client_key)
             s_.update(label="Done", state="complete", expanded=False)
         st.session_state.perf = {"client": client_key, "path": str(path)}
 
@@ -633,7 +680,6 @@ with tab_track:
             st.caption(f"Showing the snapshot from {prev[-1].stem[-8:]}. "
                        f"Pull again for current numbers.")
     if pf:
-        from pipeline.performance import AccountStats, attach_sources
 
         stats = AccountStats(**json.loads(Path(pf["path"]).read_text(encoding="utf-8")))
         attach_sources(stats, Path(config.performance_dir)
@@ -741,7 +787,6 @@ with tab_track:
                                                   f"· {c.get('topic') or ''} · "
                                                   f"{c['hook'][:50]}")
                         if st.button("Link them"):
-                            from pipeline.performance import register
                             ck["source_video"] = cf.stem
                             register(Path(config.performance_dir)
                                      / f"{pf['client']}_published.json",
@@ -768,7 +813,7 @@ with tab_track:
             "Save %": round(p.save_rate() * 100, 2),
             "From pipeline": p.clip_source.get("topic", "") if p.clip_source else "",
         } for p in posts]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
         snaps = sorted(Path(config.performance_dir)
                        .glob(f"{pf['client']}_performance_*.json"))
