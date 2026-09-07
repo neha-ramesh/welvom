@@ -322,7 +322,7 @@ with tab_clip:
     # More candidates than anyone will post. A week is 10-14 slots at two a day,
     # and having spares is what makes "these three are weak" survivable without
     # re-running the whole video.
-    n = c2.selectbox("How many clips?", [3, 5, 8, 12], index=2)
+    n = c2.selectbox("How many clips?", [1,2,3, 5, 8, 12], index=2)
     # No half-run option. A "just cut it" mode sounds useful and is not: the
     # raw cuts are horizontal with no captions, so nobody can judge them as
     # reels, and anyone who likes them has to pay for the second half anyway.
