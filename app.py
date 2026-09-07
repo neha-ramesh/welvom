@@ -35,6 +35,22 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Streamlit Cloud keeps secrets in st.secrets; everything in pipeline/ reads
+# os.getenv, and config.py evaluates its defaults at import time. So the copy
+# has to happen here, before that import, or every key reads as empty and the
+# app silently reports nothing configured.
+#
+# Locally there are no secrets and .env is loaded by config.py as usual, so this
+# is a no-op on your own machine.
+import os
+
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, (str, int, float, bool)):
+            os.environ.setdefault(str(_k), str(_v))
+except Exception:
+    pass  # no secrets.toml — running locally
+
 st.set_page_config(page_title="Welvom", page_icon="◐", layout="wide")
 
 # --------------------------------------------------------------------------- #
@@ -113,67 +129,63 @@ with st.sidebar:
 
     from pipeline.config import config
 
-    st.caption("**Wired up**")
-    for label, ok in [
-        ("Groq (speech)", bool(config.groq_api_key)),
-        ("Gemini", bool(config.llm_api_key)),
-        ("Claude", bool(config.anthropic_api_key)),
-        ("Vizard", bool(config.vizard_api_key)),
-        ("GitHub storage", bool(config.github_token and config.github_repo)),
-        ("Apify", bool(config.apify_token)),
-    ]:
-        st.write(f"{'✓' if ok else '·'} {label}")
+    # Which services are wired up is a deployment detail. A client seeing
+    # "Groq (speech)" unticked learns nothing and worries anyway, so the whole
+    # checklist lives behind this.
+    internal = st.toggle(
+        "Internal mode", value=False,
+        help="Shows configuration and bookkeeping that clients do not need.")
 
-    # Drive gets its own block because there are three separate ways for it to
-    # be not-quite-configured, and a single tick hides which one you have hit.
-    from pathlib import Path as _P
-    _creds = _P(config.drive_creds)
-    if not config.drive_folder_id:
-        st.write("· Google Drive — no DRIVE_FOLDER_ID in .env")
-    elif not _creds.exists():
-        st.write(f"· Google Drive — key file not found at `{_creds}`")
-        st.caption(f"Looking in {_P.cwd()}")
-    else:
-        _tok = _P(config.drive_token)
-        if _tok.exists():
-            st.write("✓ Google Drive")
+    if internal:
+        from pathlib import Path as _P
+
+        st.caption("**Wired up**")
+        for label, ok in [
+            ("Groq (speech)", bool(config.groq_api_key)),
+            ("Gemini", bool(config.llm_api_key)),
+            ("Claude", bool(config.anthropic_api_key)),
+            ("Vizard", bool(config.vizard_api_key)),
+            ("GitHub storage", bool(config.github_token and config.github_repo)),
+            ("Apify", bool(config.apify_token)),
+            ("Instagram insights", bool(config.client_ig_token
+                                        and config.client_ig_user_id)),
+        ]:
+            st.write(f"{'✓' if ok else '·'} {label}")
+
+        # Drive gets its own lines: there are three separate ways for it to be
+        # not-quite-configured and one tick would hide which you have hit.
+        _creds = _P(config.drive_creds)
+        if not config.drive_folder_id:
+            st.write("· Google Drive — no DRIVE_FOLDER_ID")
+        elif not _creds.exists():
+            st.write("· Google Drive — key file missing")
+            st.caption(f"Looked for `{_creds}` in {_P.cwd()}")
+        elif not _P(config.drive_token).exists():
+            st.write("· Google Drive — not authorised")
+            st.caption("Run `python auth_drive.py` once, locally.")
         else:
-            st.write("· Google Drive — not authorised yet")
-            st.caption("Run `python auth_drive.py` once. It opens a browser, you "
-                       "approve it, and nothing asks again. That is you "
-                       "connecting your own Drive — clients only ever get a "
-                       "folder link.")
+            st.write("✓ Google Drive")
+
         if st.button("Test the Drive connection", use_container_width=True):
-            import json as _j
-            try:
-                email = _j.loads(_creds.read_text()).get("client_email", "?")
-            except Exception:
-                email = "?"
             try:
                 from pipeline.storage import upload_drive
                 probe = _P(tempfile.gettempdir()) / "welvom-test.txt"
                 probe.write_text("welvom connection test")
-                link = upload_drive(probe, "welvom-test.txt",
-                                    folder_id=config.drive_folder_id,
-                                    creds_file=config.drive_creds,
-                                    token_file=config.drive_token)
-                st.success("Uploaded. Check the folder.")
-                st.write(link)
+                st.success(upload_drive(probe, "welvom-test.txt",
+                                        folder_id=config.drive_folder_id,
+                                        creds_file=config.drive_creds,
+                                        token_file=config.drive_token))
             except Exception as e:
                 st.error(str(e)[:400])
-                if email and email != "?":
-                    st.caption(f"Service account: **{email}** — only works with "
-                               f"a Workspace Shared Drive.")
 
-    st.caption("Anything unticked is missing from .env")
-    st.divider()
-    # Linking a post back to the run that produced it is internal bookkeeping.
-    # A client cannot answer "which run was this" and should not be looking at
-    # the question, so it stays hidden unless someone on the team turns it on.
-    internal = st.toggle(
-        "Internal mode", value=False,
-        help="Shows bookkeeping steps that clients do not need to see.")
-
+        # On Streamlit Cloud a missing secret looks identical to a typo in the
+        # key name, so show what actually arrived.
+        try:
+            keys = sorted(st.secrets.keys())
+            st.caption(f"{len(keys)} secret(s) loaded"
+                       + (f": {', '.join(keys[:6])}…" if keys else ""))
+        except Exception:
+            st.caption("No secrets file — reading .env")
 
 tab_clip, tab_audit, tab_track = st.tabs(
     ["Clip a video", "Audit a client", "Track what worked"])
@@ -218,7 +230,7 @@ with tab_clip:
     # More candidates than anyone will post. A week is 10-14 slots at two a day,
     # and having spares is what makes "these three are weak" survivable without
     # re-running the whole video.
-    n = c2.selectbox("How many clips?", [5, 8, 12], index=1)
+    n = c2.selectbox("How many clips?", [3, 5, 8, 12], index=2)
     # No half-run option. A "just cut it" mode sounds useful and is not: the
     # raw cuts are horizontal with no captions, so nobody can judge them as
     # reels, and anyone who likes them has to pay for the second half anyway.
@@ -226,11 +238,13 @@ with tab_clip:
     # folder — which is where it happens already, when scheduling.
     _creds_path = Path(config.drive_creds)
     drive_on = bool(config.drive_folder_id and _creds_path.exists())
-    dest = c3.text_input(
-        "Also keep a copy in",
-        value=config.delivery_dir,
-        help="Finished clips are uploaded to the client's Drive folder. This is "
-             "just a local copy as well.")
+    # Optional. On a hosted deployment there is nowhere useful to keep a copy
+    # anyway — the disk is wiped on restart — so this defaults to off there.
+    keep_local = c3.checkbox("Also keep a local copy",
+                             value=not bool(config.drive_folder_id))
+    dest = (c3.text_input("Folder", value=config.delivery_dir,
+                          label_visibility="collapsed")
+            if keep_local else tempfile.gettempdir())
     if drive_on:
         from pipeline.storage import folder_link
         c3.caption(f"Delivering to [the Drive folder]"
@@ -466,6 +480,11 @@ with tab_audit:
         "lalithaajewellery_\nbhimajewelleryofficial\nb.b.jewellers",
         height=120)
 
+    if config.competitor_backend == "apify" and not config.apify_token:
+        st.warning("No APIFY_TOKEN. Add it to .env, or to Settings → Secrets "
+                   "if this is deployed.")
+        st.stop()
+
     if st.button("Pull last 25 posts each", type="primary"):
         from pipeline.competitors import fetch_apify_batch, fetch_official, save_snapshot
 
@@ -531,14 +550,16 @@ with tab_audit:
 with tab_track:
     st.markdown("# What actually happened after posting")
 
-    if config.performance_backend != "official" or not config.client_ig_token:
-        st.warning(
-            "Not connected to Instagram. Run `python setup_meta.py YOUR_TOKEN` "
-            "and put `CLIENT_IG_USER_ID` and `CLIENT_IG_TOKEN` in .env."
+    if not (config.client_ig_token and config.client_ig_user_id):
+        missing = [k for k, v in (("CLIENT_IG_TOKEN", config.client_ig_token),
+                                  ("CLIENT_IG_USER_ID", config.client_ig_user_id))
+                   if not v]
+        st.warning(f"Not connected to Instagram — missing {', '.join(missing)}.")
+        st.caption(
+            "Locally: run `python setup_meta.py YOUR_TOKEN`, which finds the "
+            "account id and prints both values. Deployed: add them under "
+            "Settings → Secrets, in TOML — `CLIENT_IG_TOKEN = \"EAA…\"`."
         )
-        st.caption("Without this you get likes and comments — the same data the "
-                   "audit tab already collects about competitors. Reach, saves, "
-                   "shares and watch time only come through the authorised API.")
         st.stop()
 
     tc1, tc2 = st.columns([1, 3])
