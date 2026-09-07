@@ -1,0 +1,10 @@
+
+data/
+*.mp4
+*.mov
+drive-token.json
+google-oauth.json
+service-account.json
+.env
+__pycache__/
+.venv/

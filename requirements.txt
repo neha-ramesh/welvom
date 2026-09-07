@@ -1,0 +1,18 @@
+# core
+pydantic>=2.7
+python-dotenv>=1.0
+openai>=1.40          # used as a generic OpenAI-compatible client for the LLM
+
+# local transcription (skip if you only use ASR_BACKEND=groq)
+faster-whisper>=1.0.3
+
+# hosted transcription (skip if you only run locally)
+groq>=0.11
+requests>=2.31       # Vizard API calls
+anthropic>=0.40      # only needed if LLM_BACKEND=anthropic
+sarvamai>=0.1          # only needed if ASR_BACKEND=sarvam
+apify-client>=1.8       # only needed if COMPETITOR_BACKEND=apify
+streamlit>=1.40        # the UI
+google-auth-oauthlib
+google-api-python-client
+google-auth

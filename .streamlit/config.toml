@@ -1,0 +1,20 @@
+[server]
+# Default is 200 MB, which rejects any real client recording — a 78-minute
+# 1080p file is around 500 MB and a 2-hour one is several GB.
+maxUploadSize = 5000
+
+# The browser upload still copies the whole file into memory before writing it
+# to disk, so for anything large prefer the "file already on this machine"
+# option in the app: it hands ffmpeg the original path and copies nothing.
+maxMessageSize = 5000
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#8A6B1F"
+backgroundColor = "#FAF8F3"
+secondaryBackgroundColor = "#F2EFE7"
+textColor = "#12261F"
+font = "serif"
