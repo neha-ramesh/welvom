@@ -645,7 +645,10 @@ with tab_audit:
 # --------------------------------------------------------------------------- #
 
 with tab_track:
+    _who = st.session_state.get("perf_username") or ""
     st.markdown("# What actually happened after posting")
+    if _who:
+        st.caption(f"Reading @{_who} — the account this token is authorised on.")
 
     if not (config.client_ig_token and config.client_ig_user_id):
         missing = [k for k, v in (("CLIENT_IG_TOKEN", config.client_ig_token),
@@ -659,13 +662,16 @@ with tab_track:
         )
         st.stop()
 
-    tc1, tc2 = st.columns([1, 3])
-    client_key = tc1.text_input("Label these results", "welvom",
-                                help="Just a filename for the stored snapshots.")
-    limit = tc2.select_slider("How many recent posts", [10, 25, 50, 100], value=25,
-                              help="Insights cost one API call per post, against "
-                                   "a limit of about 200 an hour. 25 is plenty "
-                                   "for weekly tracking.")
+    # No account field. The Graph token decides which account this reads, so
+    # asking someone to name it invites the idea that typing a different handle
+    # would work. The snapshot filename derives from the account itself.
+    client_key = (st.session_state.get("perf_username")
+                  or config.client_ig_username
+                  or "account")
+    limit = st.select_slider("How many recent posts", [10, 25, 50, 100], value=25,
+                             help="Insights cost one API call per post, against "
+                                  "a limit of about 200 an hour. 25 is plenty "
+                                  "for weekly tracking.")
 
     if st.button("Pull the numbers", type="primary"):
 
@@ -678,6 +684,10 @@ with tab_track:
                 st.stop()
             st.write(f"@{stats.username} · {stats.followers:,} followers · "
                      f"{len(stats.posts)} posts")
+            # Remember it so later reruns name the snapshot the same way.
+            if stats.username:
+                st.session_state.perf_username = stats.username
+                client_key = stats.username
             reg = Path(config.performance_dir) / f"{client_key}_published.json"
             matched = attach_sources(stats, reg)
             if matched:
@@ -693,6 +703,14 @@ with tab_track:
     if not pf:
         prev = sorted(Path(config.performance_dir)
                       .glob(f"{client_key}_performance_*.json"))
+        if not prev:
+            # Snapshots used to be named after a label the user typed, before
+            # the account name was derived from the token. Fall back to any
+            # stored snapshot rather than appearing to have lost the history.
+            prev = sorted(Path(config.performance_dir)
+                          .glob("*_performance_*.json"))
+            if prev:
+                client_key = prev[-1].stem.split("_performance_")[0]
         if prev:
             pf = {"client": client_key, "path": str(prev[-1])}
             st.caption(f"Showing the snapshot from {prev[-1].stem[-8:]}. "
