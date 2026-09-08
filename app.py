@@ -103,6 +103,7 @@ from pipeline.competitors import (
     save_snapshot as save_competitor_snapshot,
 )
 from pipeline.config import config
+from pipeline.ffmpeg_setup import ensure_ffmpeg, which_report
 from pipeline.models import VideoAnalysis
 from pipeline.performance import (
     AccountStats,
@@ -120,6 +121,11 @@ from pipeline.storage import (
     upload_drive,
 )
 from pipeline.vizard import parse_result, poll, submit_for_editing
+
+# Put ffmpeg on PATH before any tab can shell out to it. Prefers a system
+# install; falls back to the pip-installed static build, which is what makes
+# this work on a host where apt is unavailable or broken.
+_FFMPEG_OK = ensure_ffmpeg()
 
 # --------------------------------------------------------------------------- #
 # Styling
@@ -251,6 +257,7 @@ with st.sidebar:
                        + (f": {', '.join(keys[:6])}…" if keys else ""))
         except Exception:
             st.caption("No secrets file — reading .env")
+        st.caption(which_report())
 
 tab_clip, tab_audit, tab_track = st.tabs(
     ["Clip a video", "Audit a client", "Track what worked"])
@@ -264,6 +271,17 @@ with tab_clip:
     st.caption("Drop in a recording of any length. It transcribes, picks the "
                "moments that stand alone, cuts on the breath, and sends them "
                "for captions.")
+
+    # ffprobe and ffmpeg are shelled out to, so their absence surfaces as a
+    # FileNotFoundError from subprocess with no hint about what is missing. On
+    # Streamlit Cloud they come from packages.txt, which fails to install
+    # whenever Debian's mirror has a stale release file — so this is worth
+    # checking rather than letting someone hit Start and read a traceback.
+    if not _FFMPEG_OK:
+        st.error("Video tools are unavailable on this machine.")
+        st.caption("Add `static-ffmpeg` to requirements.txt, or install ffmpeg "
+                   "system-wide.")
+        st.stop()
 
     # Clipping is the heavy tab: it holds the upload, extracts audio,
     # transcribes, and renders several files. Streamlit Community Cloud gives
@@ -322,7 +340,7 @@ with tab_clip:
     # More candidates than anyone will post. A week is 10-14 slots at two a day,
     # and having spares is what makes "these three are weak" survivable without
     # re-running the whole video.
-    n = c2.selectbox("How many clips?", [1,2,3, 5, 8, 12], index=2)
+    n = c2.selectbox("How many clips?", [3, 5, 8, 12], index=2)
     # No half-run option. A "just cut it" mode sounds useful and is not: the
     # raw cuts are horizontal with no captions, so nobody can judge them as
     # reels, and anyone who likes them has to pay for the second half anyway.

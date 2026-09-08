@@ -16,6 +16,7 @@ silently misaligned.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -161,11 +162,22 @@ def transcribe_long(audio: Path, transcribe_fn, verbose: bool = True) -> Transcr
     if size_mb <= MAX_BYTES / 1e6:
         return transcribe_fn(audio)
 
-    dur = float(subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-         "-of", "csv=p=0", str(audio)],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip())
+    # Duration via ffprobe when it exists, otherwise parsed from ffmpeg's own
+    # output. The pip-installed ffmpeg that makes deployment work without apt
+    # ships the encoder only, and losing long-video support to a missing
+    # metadata tool would be a poor trade.
+    from .probe import _metadata_via_ffmpeg
+
+    if shutil.which("ffprobe"):
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(audio)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip())
+    else:
+        dur = float(_metadata_via_ffmpeg(audio).get("duration") or 0)
+        if not dur:
+            raise RuntimeError(f"Could not read the duration of {audio.name}")
 
     if verbose:
         print(f"      {size_mb:.0f} MB / {dur/60:.0f} min — splitting for upload")

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +37,60 @@ def video_id_for(path: Path) -> str:
     return h.hexdigest()[:12]
 
 
+def _metadata_via_ffmpeg(video_path: Path) -> dict:
+    """Duration and dimensions parsed from ffmpeg's own output.
+
+    ffprobe is the right tool and is not always present: the pip-installed
+    ffmpeg that makes deployment possible without apt ships the encoder only.
+    Rather than make ffprobe a hard requirement — and lose the whole clip tab on
+    any host where apt is unavailable — read the same facts from what ffmpeg
+    prints to stderr when handed a file with no output specified.
+
+    Less precise than ffprobe's JSON, and that is fine: duration to a hundredth
+    of a second is ample for cutting clips.
+    """
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", str(video_path)],
+        capture_output=True, text=True,
+    )
+    err = proc.stderr
+
+    out: dict = {}
+    m = re.search(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)", err)
+    if m:
+        h, mi, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        out["duration"] = h * 3600 + mi * 60 + sec
+
+    m = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", err)
+    if m:
+        out["width"], out["height"] = int(m.group(1)), int(m.group(2))
+
+    m = re.search(r"(\d+(?:\.\d+)?)\s*fps", err)
+    if m:
+        out["fps"] = round(float(m.group(1)), 3)
+
+    return out
+
+
 def extract_metadata(video_path: Path, source: str = "local") -> Metadata:
+    if not shutil.which("ffprobe"):
+        got = _metadata_via_ffmpeg(video_path)
+        if not got.get("duration"):
+            raise RuntimeError(
+                f"Could not read {video_path.name}. Neither ffprobe nor ffmpeg "
+                f"could parse it."
+            )
+        return Metadata(
+            video_id=video_id_for(video_path),
+            source=source,
+            duration=float(got["duration"]),
+            title=video_path.stem,
+            width=got.get("width"),
+            height=got.get("height"),
+            fps=got.get("fps"),
+            processed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
     raw = _run(
         [
             "ffprobe",
